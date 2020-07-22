@@ -1,0 +1,442 @@
+---
+title: "project 2"
+author: "Sichun Li, Qiqi Liu, Tong Niu, Yunqing Yu, Xiao Yang"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+
+```{r}
+library("dummies")
+library("AER")
+library("scatterplot3d")
+library("rgl")
+library("data.table")
+library("mlogit")
+library("gmnl")
+rm(list = ls());
+setwd("~/Desktop/Pricing Analytics/project/project 2")
+```
+
+
+```{r load data}
+data=fread("kiwi_bubbles_P2.csv",stringsAsFactors = F)
+#Data cleaning - drop periods with price=99 (stockout).
+data=data[!(data$price.KB==99),]
+data=data[!(data$price.KR==99),]
+data=data[!(data$price.MB==99),]
+```
+
+3 Logit model without segmentation
+```{r Q3:Logit model without segmentation}
+#Multinomial logit
+#Product-line pricing
+#Solve a profit maximization problem over two products
+
+#Write choice probability for both KB and KR as a function
+#Notational change - use "para" to represent all parameter inputs,
+#instead of separately defining them as "beta0KB,beta0KR,beta0MB,beta1".
+
+demand=function(priceKB,priceKR,priceMB,para){
+  probKB=exp(para[1]+para[4]*priceKB)/(1+exp(para[1]+para[4]*priceKB)+exp(para[2]+para[4]*priceKR)+exp(para[3]+para[4]*priceMB))
+  probKR=exp(para[2]+para[4]*priceKR)/(1+exp(para[1]+para[4]*priceKB)+exp(para[2]+para[4]*priceKR)+exp(para[3]+para[4]*priceMB))
+  return(cbind(probKB,probKR))
+}
+
+#Write profit as a function of prices we set and model parameters
+profit=function(priceKB,priceKR,priceMB,para){
+  profitKB=demand(priceKB,priceKR,priceMB,para)[,1]*(priceKB-uc)
+  profitKR=demand(priceKB,priceKR,priceMB,para)[,2]*(priceKR-uc)
+  return(cbind(profitKB,profitKR))
+}
+#Unit cost
+uc=0.5;
+
+###Estimation of multinomial logit model
+#Now columns 4 through 7 contains "Price.something" info.
+mlogitdata=mlogit.data(data,id="id",varying=4:7,choice="choice",shape="wide")
+#Run MLE.
+mle= gmnl(choice ~  price, data = mlogitdata)
+summary(mle)
+coef=mle$coefficients
+
+#Set parameter
+#The first element of "para" is beta0KB,beta0KR,beta0MB,beta1"
+para=c(coef[1],coef[2],coef[3],coef[4])
+
+###calculate own- and cross-price elasticities(evaluated at the average prices observed in the data)
+meanPrice<-c(mean(data$price.KB),mean(data$price.KR),mean(data$price.MB))
+demandForAll=function(priceKB,priceKR,priceMB,para){
+  probKB=exp(para[1]+para[4]*priceKB)/(1+exp(para[1]+para[4]*priceKB)+exp(para[2]+para[4]*priceKR)+exp(para[3]+para[4]*priceMB))
+  probKR=exp(para[2]+para[4]*priceKR)/(1+exp(para[1]+para[4]*priceKB)+exp(para[2]+para[4]*priceKR)+exp(para[3]+para[4]*priceMB))
+  probMB=exp(para[3]+para[4]*priceMB)/(1+exp(para[1]+para[4]*priceKB)+exp(para[2]+para[4]*priceKR)+exp(para[3]+para[4]*priceMB))
+  return(cbind(probKB,probKR,probMB))
+}
+prob<-demandForAll(meanPrice[1],meanPrice[2],meanPrice[3],para)
+
+ownElasticity=function(beta1,price,prob){
+  ownElasticity=-beta1*price*(1-prob)
+  return(ownElasticity)
+}
+crossElasticity=function(beta1,price,prob){
+  crossElasticity=-beta1*price*prob
+  return(crossElasticity)
+}
+
+#built a matrix for both own- and cross- ealsticity 
+
+ElastMatrix<-data.frame(matrix(ncol = 3, nrow = 3))
+colnames(ElastMatrix)<- c("KB",'KR','MB')
+rownames(ElastMatrix)<- c("KB",'KR','MB')
+
+for(i in 1:3){
+  for(j in 1:3){#Products in column change prices and then influence products in rows
+    if (rownames(ElastMatrix)[i]==colnames(ElastMatrix)[j]){
+      ElastMatrix[i,j]=ownElasticity(para[4],meanPrice[i],prob[i])}
+    else{ElastMatrix[i,j]=crossElasticity(para[4],meanPrice[j],prob[j])}
+  }
+}
+
+
+###calculate profit
+#"demand" function represents each individual consumer's choice probability.
+#In order to calculate profit, we multiply the "demand" by the number of consumers.
+
+#Choose space of prices to search for the optimal price over
+aux=seq(0.88,1.47,0.01)
+#Because we search over two dimensions, create complete combination 
+#of the two prices
+pricespace=expand.grid(aux,aux)
+colnames(pricespace)=c('priceKB','priceKR')
+#Compute profit at each realization of this price space.
+#write for-loop, take one realization of [P^KB,P^KR] pair and evaluate
+#profit at that realization.
+profitmat=matrix(0L,nrow(pricespace),1)
+for (i in 1:nrow(pricespace)){
+    profitmat[i]=sum(profit(pricespace[i,1],pricespace[i,2],1.43,para))  
+}
+expectedProfit=1000*max(profitmat[,1])
+optimalPrices=pricespace[which.max(profitmat[,1]),]
+optimalPrices
+#Both optimal KB price and optimal KR are 1.16.
+```
+
+4 Logit model with segmentation
+```{r Q4:Logit model with segmentation}
+library(cluster)
+library(fpc)
+library(factoextra)
+library(gridExtra)
+library(conjoint)
+demo=fread("demo_P2.csv",stringsAsFactors = F)
+#Number of individuals
+N = length(unique(data$id))
+
+#Clustering
+clustTest = function(toClust,print=TRUE,scale=TRUE,maxClusts=15,seed=12345,nstart=20,iter.max=100){
+    if(scale){ toClust = scale(toClust);}
+    set.seed(seed);   # set random number seed before doing cluster analysis
+    wss <- (nrow(toClust)-1)*sum(apply(toClust,2,var))
+    for (i in 2:maxClusts) wss[i] <- sum(kmeans(toClust,centers=i,nstart=nstart,iter.max=iter.max)$withinss)
+    ##gpw essentially does the following plot using wss above. 
+    #plot(1:maxClusts, wss, type="b", xlab="Number of Clusters",ylab="Within groups sum of squares")
+    gpw = fviz_nbclust(toClust,kmeans,method="wss",iter.max=iter.max,nstart=nstart,k.max=maxClusts) #alternative way to get wss elbow chart.
+    pm1 = pamk(toClust,scaling=TRUE)
+    ## pm1$nc indicates the optimal number of clusters based on 
+    ## lowest average silhoutte score (a measure of quality of clustering)
+    #alternative way that presents it visually as well.
+    gps = fviz_nbclust(toClust,kmeans,method="silhouette",iter.max=iter.max,nstart=nstart,k.max=maxClusts) 
+    if(print){
+        grid.arrange(gpw,gps, nrow = 1)
+    }
+    list(wss=wss,pm1=pm1$nc,gpw=gpw,gps=gps)
+}
+##Runs a set of clusters as kmeans
+##Arguments:
+##  toClust, data.frame with data to cluster
+##  nClusts, vector of number of clusters, each run as separate kmeans 
+##  ... some additional arguments to be passed to clusters
+##Return:
+##  list of 
+##    kms, kmeans cluster output with length of nClusts
+##    ps, list of plots of the clusters against first 2 principle components
+runClusts = function(toClust,nClusts,print=TRUE,maxClusts=15,seed=12345,nstart=20,iter.max=100){
+    kms=list(); ps=list();
+    for(i in 1:length(nClusts)){
+        kms[[i]] = kmeans(toClust,nClusts[i],iter.max = iter.max, nstart=nstart)
+        ps[[i]] = fviz_cluster(kms[[i]], geom = "point", data = toClust) + ggtitle(paste("k =",nClusts[i]))
+        
+    }
+    library(gridExtra)
+    if(print){
+        tmp = marrangeGrob(ps, nrow = 2,ncol=2)
+        print(tmp)
+    }
+    list(kms=kms,ps=ps)
+}
+##Plots a kmeans cluster as three plot report
+##  pie chart with membership percentages
+##  ellipse plot that indicates cluster definitions against principle components
+##  barplot of the cluster means
+plotClust = function(km,toClust,discPlot=FALSE){
+    nc = length(km$size)
+    if(discPlot){par(mfrow=c(2,2))}
+    else {par(mfrow=c(3,1))}
+    percsize = paste(1:nc," = ",format(km$size/sum(km$size)*100,digits=2),"%",sep="")
+    pie(km$size,labels=percsize,col=1:nc)
+    
+    clusplot(toClust, km$cluster, color=TRUE, shade=TRUE,
+             labels=2, lines=0,col.clus=1:nc); #plot clusters against principal components
+    
+    if(discPlot){
+        plotcluster(toClust, km$cluster,col=km$cluster); #plot against discriminant functions ()
+    }
+    rng = range(km$centers)
+    dist = rng[2]-rng[1]
+    locs = km$centers+.05*dist*ifelse(km$centers>0,1,-1)
+    bm = barplot(km$centers,beside=TRUE,col=1:nc,main="Cluster Means",ylim=rng+dist*c(-.1,.1))
+    text(bm,locs,formatC(km$centers,format="f",digits=1))
+}
+
+checks = clustTest(demo)
+clusts=runClusts(demo,2:5)
+for(i in 1:4) {plotClust(clusts[[1]][[i]],demo)}
+   
+KmeansCluster = function(n){
+  set.seed(123)
+  demo_cluster = kmeans(x=demo[, 2:18], centers = n, nstart = 1000)
+  cluster_id = data.frame(id = demo$id)
+  cluster_id$cluster = demo_cluster$cluster
+  datafull = merge(data, cluster_id, by = "id", all.x = T)
+  datafull$cluster[is.na(datafull$cluster)] = n+1
+  N = length(unique(data$id))
+  seg.share = c( table(demo_cluster$cluster),N - sum(table(demo_cluster$cluster))) / N 
+
+# just store the coefficients (you can store many other things)
+  coef.est = data.frame(segment = 1:(n+1), intercept.KB = NA, intercept.KR = NA, 
+                      intercept.MB = NA, price.coef = NA) 
+    #Write a for-loop. 
+  for (seg in 1:(n+1)) {
+  # During each loop, pick subset of data of consumers from each segment.
+      data.sub = subset(datafull, cluster %in% seg)
+      mlogitdata=mlogit.data(data.sub,id="id",varying=4:7,choice="choice",shape="wide")
+  
+  #Run MLE.
+      mle= gmnl(choice ~  price, data = mlogitdata)
+  #Store the outcome in the coef.est matrix.
+      coef.est[seg, 2:5] = mle$coefficients
+        
+}
+      return(list(seg.share,datafull,coef.est))
+}
+
+KmeansCluster(2)  #change 0
+KmeansCluster(3)  #change 11.2462%
+KmeansCluster(4)  #change 10.6383%
+KmeansCluster(5)  #change 10.6383%
+KmeansCluster(6)  #change 0
+KmeansCluster(7)  #change 11.550152%
+KmeansCluster(8)  #change 11.550152%
+KmeansCluster(9)  #change 11.550152%
+KmeansCluster(10) #5,8 change 0.11550152+0.07294833=0.1884499 ######seems the best
+KmeansCluster(11) #1,3 change 0.07294833+0.09422492=0.1671732
+KmeansCluster(12) #6   change 0.07294833
+KmeansCluster(13) #change 0
+KmeansCluster(14) #6 change 0.08814590
+KmeansCluster(15) #6 change 0.08814590
+###So, when centers=10, segment=11, after lauching KB, people's change from MB to KB ......
+seg.share = KmeansCluster(10)[[1]]
+coef.est = KmeansCluster(10)[[3]]
+```
+
+
+4.1 Please see our report.
+
+4.2.1 what are the (product-level, aggregated across segments) own- and cross- elasticities among these products?
+```{r}
+#Calculate elasticity
+prSeg=function(priceKB,priceKR,priceMB) {
+  Pr1=demandForAll(priceKB,priceKR,priceMB,as.numeric(coef.est[1,2:5]))
+  Pr2=demandForAll(priceKB,priceKR,priceMB,as.numeric(coef.est[2,2:5]))
+  Pr3=demandForAll(priceKB,priceKR,priceMB,as.numeric(coef.est[3,2:5]))
+  Pr4=demandForAll(priceKB,priceKR,priceMB,as.numeric(coef.est[4,2:5]))
+  Pr5=demandForAll(priceKB,priceKR,priceMB,as.numeric(coef.est[5,2:5]))
+  Pr6=demandForAll(priceKB,priceKR,priceMB,as.numeric(coef.est[6,2:5]))
+  Pr7=demandForAll(priceKB,priceKR,priceMB,as.numeric(coef.est[7,2:5]))
+  Pr8=demandForAll(priceKB,priceKR,priceMB,as.numeric(coef.est[8,2:5]))
+  Pr9=demandForAll(priceKB,priceKR,priceMB,as.numeric(coef.est[9,2:5]))
+  Pr10=demandForAll(priceKB,priceKR,priceMB,as.numeric(coef.est[10,2:5]))
+  Pr11=demandForAll(priceKB,priceKR,priceMB,as.numeric(coef.est[11,2:5]))
+  return(list(Pr1,Pr2,Pr3,Pr4,Pr5,Pr6,Pr7,Pr8,Pr9,Pr10,Pr11))
+}# each c(Pr_KB,Pr_KR,Pr_MB)
+
+agg_choice=function(priceKB,priceKR,priceMB) {
+  agg_choice=seg.share[1]*demandForAll(priceKB,priceKR,priceMB,as.numeric(coef.est[1,2:5]))+
+    seg.share[2]*demandForAll(priceKB,priceKR,priceMB,as.numeric(coef.est[2,2:5]))+
+    seg.share[3]*demandForAll(priceKB,priceKR,priceMB,as.numeric(coef.est[3,2:5]))+
+    seg.share[4]*demandForAll(priceKB,priceKR,priceMB,as.numeric(coef.est[4,2:5]))+
+    seg.share[5]*demandForAll(priceKB,priceKR,priceMB,as.numeric(coef.est[5,2:5]))+
+    seg.share[6]*demandForAll(priceKB,priceKR,priceMB,as.numeric(coef.est[6,2:5]))+
+    seg.share[7]*demandForAll(priceKB,priceKR,priceMB,as.numeric(coef.est[7,2:5]))+
+    seg.share[8]*demandForAll(priceKB,priceKR,priceMB,as.numeric(coef.est[8,2:5]))+
+    seg.share[9]*demandForAll(priceKB,priceKR,priceMB,as.numeric(coef.est[9,2:5]))+
+    seg.share[10]*demandForAll(priceKB,priceKR,priceMB,as.numeric(coef.est[10,2:5]))+
+    seg.share[11]*demandForAll(priceKB,priceKR,priceMB,as.numeric(coef.est[11,2:5]))
+  return(agg_choice)
+}# aggregate c(Pr_KB,Pr_KR,Pr_MB) R,Pr_MB) 
+segPr=prSeg(meanPrice[1],meanPrice[2],meanPrice[3])
+segPr <- data.frame(matrix(unlist(segPr), nrow=length(segPr), byrow=T))
+segAggPr=agg_choice(meanPrice[1],meanPrice[2],meanPrice[3])
+ 
+# own-price elasticities
+segOwnElasticity=function(price,Pr,segShare,beta0,segPr){
+  SegOwnElasticity=-price*sum(segShare*beta0*segPr*(1-segPr))/Pr
+  return(SegOwnElasticity)
+}
+# cross-price elasticities j's price to i
+segCrossElasticity=function(price,Pr,segShare,beta1,segPr,i,j){
+  SegCrossElasticity=-price/Pr*sum(segShare*beta1*segPr[[i]]*segPr[[j]])
+  return(SegCrossElasticity)
+}
+
+#built a matrix for both own- and cross- ealsticity 
+segElastMatrix<-data.frame(matrix(ncol = 3, nrow = 3))
+colnames(segElastMatrix)<- c("KB",'KR','MB')
+rownames(segElastMatrix)<- c("KB",'KR','MB')
+
+for(i in 1:3){
+  for(j in 1:3){#Products in column change prices and then influence products in rows
+    if (rownames(segElastMatrix)[i]==colnames(segElastMatrix)[j]){
+      segElastMatrix[i,j]=segOwnElasticity(meanPrice[i],segAggPr[i],seg.share,coef.est[,5],segPr[[i]])
+    }else{segElastMatrix[i,j]=segCrossElasticity(meanPrice[j],segAggPr[i],seg.share,coef.est[,5],segPr,i,j)}
+  }
+}
+```
+4.2.2 How does the underlying customer segmentation explain the substitution pattern you see in the elasticity?
+From the substitution pattern and underlying segmentation, where (i.e. which segment(s)) should Kiwi Bubbles be positioned?
+
+Please see our report.
+
+
+
+4.2.3 
+```{r}
+#If not lauching KB
+#"newpara" is beta0KB,beta0KR,beta0MB,beta1
+demandPrevious=function(priceKR,priceMB,newpara){
+  probKR=exp(newpara[2]+newpara[4]*priceKR)/(1+exp(newpara[2]+newpara[4]*priceKR)+exp(newpara[3]+newpara[4]*priceMB))
+  probMB=exp(para[3]+para[4]*priceMB)/(1+exp(para[2]+para[4]*priceKR)+exp(para[3]+para[4]*priceMB))
+  return(cbind(probKR,probMB))
+}
+
+agg_choicePrevious=function(priceKR,priceMB) {
+  agg_choice=seg.share[1]*demandPrevious(priceKR,priceMB,as.numeric(coef.est[1,2:5]))+
+    seg.share[2]*demandPrevious(priceKR,priceMB,as.numeric(coef.est[2,2:5]))+
+    seg.share[3]*demandPrevious(priceKR,priceMB,as.numeric(coef.est[3,2:5]))+
+    seg.share[4]*demandPrevious(priceKR,priceMB,as.numeric(coef.est[4,2:5]))+
+    seg.share[5]*demandPrevious(priceKR,priceMB,as.numeric(coef.est[5,2:5]))+
+    seg.share[6]*demandPrevious(priceKR,priceMB,as.numeric(coef.est[6,2:5]))+
+    seg.share[7]*demandPrevious(priceKR,priceMB,as.numeric(coef.est[7,2:5]))+
+    seg.share[8]*demandPrevious(priceKR,priceMB,as.numeric(coef.est[8,2:5]))+
+    seg.share[9]*demandPrevious(priceKR,priceMB,as.numeric(coef.est[9,2:5]))+
+    seg.share[10]*demandPrevious(priceKR,priceMB,as.numeric(coef.est[10,2:5]))+
+    seg.share[11]*demandPrevious(priceKR,priceMB,as.numeric(coef.est[11,2:5]))
+  return(agg_choice)
+}
+
+uc=0.5
+pricespaceForKR=seq(0.88,1.43,0.01)
+profit_previous=1000*(agg_choicePrevious(pricespaceForKR,1.43)[,1])*(pricespaceForKR-uc)
+max(profit_previous)
+priceKR_previous=pricespaceForKR[which.max(profit_previous)]
+priceKR_previous
+#if we do not launch KB, optimal price is $1.06, best profit is 285.592
+
+#If lauching KB
+#The first element of "newpara" is beta0KB,beta0KR,beta0MB,beta1"
+ProfitAfter=function(priceKB,priceKR,priceMB){
+  profitKB=agg_choice(priceKB,priceKR,priceMB)[,1]*(priceKB-0.5)*1000
+  profitKR=agg_choice(priceKB,priceKR,priceMB)[,2]*(priceKR-0.5)*1000
+  profitMB=agg_choice(priceKB,priceKR,priceMB)[,3]*(priceMB-0.5)*1000
+  return(cbind(profitKB,profitKR,profitMB))
+}
+#Choose space of prices to search for the optimal price over
+aux=seq(0.88,1.47,0.01)
+#Because we search over two dimensions, create complete combination 
+#of the two prices
+pricespace=expand.grid(aux,aux)
+#At each iteration of the loop, I take one realization of [P^KB,P^KR] pair and evaluate
+#profit at that realization.
+profitmat=matrix(nrow(pricespace),1)
+for (i in 1:nrow(pricespace)){
+    profitmat[i]=sum(ProfitAfter(pricespace[i,1],pricespace[i,2],1.43)[,c(1,2)])
+}
+priceKB_seg = pricespace[profitmat==max(profitmat),][,1];
+priceKB_seg #1.13
+priceKR_seg = pricespace[profitmat==max(profitmat),][,2];
+priceKR_seg #1.2
+profit_after = max(profitmat); 
+profit_after #395.6119
+
+#MB change, before launch KB
+profitMB_previous=1000*agg_choicePrevious(priceKR_previous,1.43)[,2]*(1.43-uc)
+profitMB_previous #105.6955
+profitMB_after=ProfitAfter(priceKB_seg,priceKR_seg,1.43)[,3]
+profitMB_after #86.57259
+```
+
+
+
+
+5 Understanding strategic responses
+```{r Q5:Understanding strategic responses}
+# price war
+
+#As Mango, I need to react to KB and KR’s new prices.
+KB1=priceKB_seg 
+KR1=priceKR_seg
+uc=0.5
+pricespace1=seq(0,2,0.01)
+profit1=1000*agg_choice(KB1,KR1,pricespace1)[,3]*(pricespace1-uc)
+max(profit1)
+MB1=pricespace1[profit1==max(profit1)];
+MB1 #0.95
+
+
+#As Kiwi, I need to react to MB’s new price.
+aux2=seq(0.8,2,0.01)
+pricespace2=expand.grid(aux2,aux2)
+profitmat=matrix(0L,nrow(pricespace2),1)
+for (i in 1:nrow(pricespace2)){
+    profitmat[i]=sum(ProfitAfter(pricespace2[i,1],pricespace2[i,2],MB1)[,1:2])
+    }
+KB2 = pricespace2[profitmat==max(profitmat),][,1];
+KB2 #0.99
+KR2 = pricespace2[profitmat==max(profitmat),][,2];
+KR2 #1.1
+
+#Then, as mango, I need to react to KB and KR's newer prices
+profit=1000*agg_choice(KB2,KR2,pricespace1)[,3]*(pricespace1-uc)
+MB2=pricespace1[profit==max(profit)];
+MB2 #0.91
+
+#Then, as Kiwi, I need to react to MB’s newer price.
+profitmat=matrix(0L,nrow(pricespace2),1)
+for (i in 1:nrow(pricespace2)){
+    profitmat[i]=sum(ProfitAfter(pricespace2[i,1],pricespace2[i,2],MB2)[,c(1,2)])
+    }
+
+KB3 = pricespace2[profitmat==max(profitmat),][,1];KB3 #0.98
+KR3 = pricespace2[profitmat==max(profitmat),][,2];KR3 #1.09
+
+#Then,then, as mango, I need to react to KB and KR's newerer prices
+profit=1000*agg_choice(KB3,KR3,pricespace1)[,3]*(pricespace1-uc)
+MB4=pricespace1[profit==max(profit)];
+MB4 #0.91
+
+```
