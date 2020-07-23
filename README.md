@@ -8,4 +8,4 @@ In this project, we built multinomial logit models both without and with segment
 * multinomial logit modeling for each customer segment; own- and cross-price elasticities calculation to explore customer preference and any substitution pattern  <br>
 * dynamic and competitive pricing analysis under “pricing war” considering competitor responses and cannibalization  <br>
 
-Outcome:launching Kiwi bullble is a wise strategy which will get Kiwi higher profit and greater market share. The equilibrium price for kiwi bubble under Nash equilibrium in price war is $0.98.
+Outcome: launching Kiwi bubble is a wise strategy which will get Kiwi higher profit and greater market share. The equilibrium price for kiwi bubble under Nash equilibrium in price war is $0.98.
