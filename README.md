@@ -1,4 +1,4 @@
-# Soft-Drink-Pricing-Analytics
+# Soft Drink Pricing Analytics
 A soft drink company,kiwi, wants to launch kiwi bubble to compete with competitor's product, mango bubble. The project is to do pricing analysis to help with pricing decisions using consumer loyalty card data in the test market.  <br>
 
 Tool: R
